@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 深蹲姿態監測系統</title>
+    <!-- 引入 Tailwind CSS 以進行介面美化 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 引入 MediaPipe Pose 相關函式庫 -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #0f172a; /* Tailwind slate-900 */
+            color: white;
+            font-family: 'Inter', sans-serif;
+            overflow: hidden;
+        }
+
+        .video-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-color: #000;
+        }
+
+        /* 隱藏原始影片，我們只顯示畫布 (Canvas) */
+        video {
+            display: none;
+        }
+
+        canvas {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            /* 水平翻轉畫布，讓使用者看到鏡像，這在運動時更直覺 */
+            transform: scaleX(-1);
+        }
+
+        /* 玻璃擬態風格的控制面板 */
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.125);
+        }
+
+        /* 自訂核取方塊樣式 */
+        .checkbox-custom:checked {
+            background-color: #3b82f6;
+            border-color: #3b82f6;
+        }
+
+        /* 錯誤訊息的浮動動畫 */
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(20px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        .error-toast {
+            animation: slideIn 0.3s ease-out forwards;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 攝影機與畫布容器 -->
+    <div class="video-container">
+        <video id="input_video" autoplay playsinline></video>
+        <canvas id="output_canvas" width="1280" height="720"></canvas>
+
+        <!-- 啟動覆蓋層 -->
+        <div id="start_overlay" class="absolute inset-0 z-50 flex flex-col items-center justify-center bg-slate-900 bg-opacity-90 transition-opacity duration-500">
+            <h1 class="text-4xl font-bold mb-6 text-blue-400 text-center">AI 深蹲姿態教練</h1>
+            <p class="text-lg text-slate-300 mb-8 max-w-lg text-center">
+                系統將使用您的攝影機與 MediaPipe 進行即時分析。請確保全身都在鏡頭畫面中，建議從側面或微側面進行深蹲以獲得最佳偵測效果。
+            </p>
+            <button id="btn_start" class="px-8 py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-full font-bold text-xl shadow-[0_0_20px_rgba(37,99,235,0.5)] transition-all transform hover:scale-105">
+                授權攝影機並開始訓練
+            </button>
+            <div id="loading_text" class="hidden mt-4 text-blue-300 animate-pulse">正在載入 AI 模型，請稍候...</div>
+        </div>
+
+        <!-- 左側控制面板 -->
+        <div class="absolute top-6 left-6 z-40 glass-panel rounded-2xl p-6 shadow-2xl w-80">
+            <h2 class="text-xl font-bold mb-4 flex items-center border-b border-slate-600 pb-3">
+                <svg class="w-6 h-6 mr-2 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                監測項目設定
+            </h2>
+            <div class="space-y-4">
+                <label class="flex items-start cursor-pointer hover:bg-slate-700 p-2 rounded transition">
+                    <input type="checkbox" id="chk_rule1" class="checkbox-custom mt-1 w-5 h-5 rounded border-slate-500 bg-slate-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-slate-900" checked>
+                    <span class="ml-3 text-slate-200">
+                        <span class="block font-semibold">抬頭挺胸</span>
+                        <span class="block text-xs text-slate-400">重心不前傾 (背部不過度傾斜)</span>
+                    </span>
+                </label>
+                <label class="flex items-start cursor-pointer hover:bg-slate-700 p-2 rounded transition">
+                    <input type="checkbox" id="chk_rule2" class="checkbox-custom mt-1 w-5 h-5 rounded border-slate-500 bg-slate-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-slate-900" checked>
+                    <span class="ml-3 text-slate-200">
+                        <span class="block font-semibold">軀幹與小腿平行</span>
+                        <span class="block text-xs text-slate-400">下蹲時背部角度應接近小腿角度</span>
+                    </span>
+                </label>
+                <label class="flex items-start cursor-pointer hover:bg-slate-700 p-2 rounded transition">
+                    <input type="checkbox" id="chk_rule3" class="checkbox-custom mt-1 w-5 h-5 rounded border-slate-500 bg-slate-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-slate-900" checked>
+                    <span class="ml-3 text-slate-200">
+                        <span class="block font-semibold">大腿平行地面</span>
+                        <span class="block text-xs text-slate-400">確保深蹲深度足夠</span>
+                    </span>
+                </label>
+                <label class="flex items-start cursor-pointer hover:bg-slate-700 p-2 rounded transition">
+                    <input type="checkbox" id="chk_rule4" class="checkbox-custom mt-1 w-5 h-5 rounded border-slate-500 bg-slate-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-slate-900" checked>
+                    <span class="ml-3 text-slate-200">
+                        <span class="block font-semibold">雙腳與肩同寬</span>
+                        <span class="block text-xs text-slate-400">且腳尖略外八</span>
+                    </span>
+                </label>
+                <label class="flex items-start cursor-pointer hover:bg-slate-700 p-2 rounded transition">
+                    <input type="checkbox" id="chk_rule5" class="checkbox-custom mt-1 w-5 h-5 rounded border-slate-500 bg-slate-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-slate-900" checked>
+                    <span class="ml-3 text-slate-200">
+                        <span class="block font-semibold">膝蓋不應超過腳尖</span>
+                        <span class="block text-xs text-slate-400">重心往後，避免膝蓋受力過大</span>
+                    </span>
+                </label>
+            </div>
+            
+            <div class="mt-6 pt-4 border-t border-slate-600">
+                <div class="flex justify-between items-center text-sm">
+                    <span class="text-slate-400">當前狀態:</span>
+                    <span id="squat_state_ui" class="font-bold text-green-400">站立</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右側錯誤訊息通知區 -->
+        <div id="error_toast_container" class="absolute top-6 right-6 z-40 flex flex-col items-end space-y-3 pointer-events-none">
+            <!-- 動態插入 Toast -->
+        </div>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const startOverlay = document.getElementById('start_overlay');
+        const btnStart = document.getElementById('btn_start');
+        const loadingText = document.getElementById('loading_text');
+        const errorToastContainer = document.getElementById('error_toast_container');
+        const squatStateUi = document.getElementById('squat_state_ui');
+
+        let camera = null;
+        let isStarted = false;
+
+        // 語音合成物件
+        const synth = window.speechSynthesis;
+        // 限制語音發送頻率，避免重疊
+        let lastSpokenTime = { r1: 0, r2: 0, r3: 0, r4: 0, r5: 0 };
+        const SPEECH_COOLDOWN = 4000; // 4秒內不重複同一錯誤警告
+
+        // 連續幀過濾器，避免小抖動造成誤判
+        let errorFrames = { r1: 0, r2: 0, r3: 0, r4: 0, r5: 0 };
+        const FRAME_THRESHOLD = 5; // 需要連續 5 幀都違反規則才觸發
+
+        // 深蹲狀態追蹤 (用於深度偵測 R3)
+        let squatState = 'standing'; // 'standing', 'descending', 'ascending'
+        let prevHipY = 0;
+        let hipYHistory = [];
+
+        // UI Toast 計時器
+        let toastTimeouts = {};
+
+        // 語音發送器
+        function speak(text, ruleId) {
+            const now = Date.now();
+            if (now - lastSpokenTime[ruleId] < SPEECH_COOLDOWN) return;
+            
+            if (synth.speaking) synth.cancel(); // 中斷前一個語音
+            const utterThis = new SpeechSynthesisUtterance(text);
+            utterThis.lang = 'zh-TW';
+            utterThis.rate = 1.2;
+            synth.speak(utterThis);
+            lastSpokenTime[ruleId] = now;
+            showErrorToast(text, ruleId);
+        }
+
+        // 顯示視覺文字錯誤
+        function showErrorToast(message, ruleId) {
+            // 如果畫面上已經有這個錯誤，重置它的計時器
+            const existingToast = document.getElementById(`toast_${ruleId}`);
+            if (existingToast) {
+                clearTimeout(toastTimeouts[ruleId]);
+                existingToast.remove();
+            }
+
+            const toast = document.createElement('div');
+            toast.id = `toast_${ruleId}`;
+            toast.className = 'error-toast bg-red-600/90 text-white px-5 py-3 rounded-lg shadow-lg font-bold border-l-4 border-red-300 flex items-center max-w-md';
+            toast.innerHTML = `
+                <svg class="w-6 h-6 mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                <span>${message}</span>
+            `;
+            errorToastContainer.appendChild(toast);
+
+            toastTimeouts[ruleId] = setTimeout(() => {
+                if (toast.parentNode) {
+                    toast.style.opacity = '0';
+                    toast.style.transition = 'opacity 0.5s ease';
+                    setTimeout(() => toast.remove(), 500);
+                }
+            }, 3000);
+        }
+
+        // 取得兩點之間的距離
+        function getDistance(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+        }
+
+        // 取得兩點構成的線段與水平線(X軸)的夾角 (0~90度)
+        function getAngleWithHorizontal(p1, p2) {
+            let dx = Math.abs(p1.x - p2.x);
+            let dy = Math.abs(p1.y - p2.y);
+            return Math.atan2(dy, dx) * 180 / Math.PI;
+        }
+
+        // 取得兩點構成的線段與垂直線(Y軸)的夾角 (0~90度)
+        function getAngleWithVertical(p1, p2) {
+            let dx = Math.abs(p1.x - p2.x);
+            let dy = Math.abs(p1.y - p2.y);
+            return Math.atan2(dx, dy) * 180 / Math.PI;
+        }
+
+        // 取得三個點構成的角度 (以 p2 為頂點)
+        function getAngle(p1, p2, p3) {
+            const angle = Math.atan2(p3.y - p2.y, p3.x - p2.x) - Math.atan2(p1.y - p2.y, p1.x - p2.x);
+            let result = Math.abs(angle * 180.0 / Math.PI);
+            if (result > 180.0) {
+                result = 360.0 - result;
+            }
+            return result;
+        }
+
+        // 輔助繪圖：畫粗紅線標示錯誤
+        function drawHighlightLine(ctx, p1, p2, color = '#ff0000', width = 6) {
+            ctx.beginPath();
+            ctx.moveTo(p1.x * canvasElement.width, p1.y * canvasElement.height);
+            ctx.lineTo(p2.x * canvasElement.width, p2.y * canvasElement.height);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width;
+            ctx.stroke();
+        }
+
+        // 輔助繪圖：畫紅框
+        function drawHighlightBox(ctx, points, color = '#ff0000', padding = 30) {
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            points.forEach(p => {
+                let px = p.x * canvasElement.width;
+                let py = p.y * canvasElement.height;
+                if (px < minX) minX = px;
+                if (px > maxX) maxX = px;
+                if (py < minY) minY = py;
+                if (py > maxY) maxY = py;
+            });
+            ctx.beginPath();
+            ctx.rect(minX - padding, minY - padding, (maxX - minX) + padding * 2, (maxY - minY) + padding * 2);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 4;
+            ctx.setLineDash([8, 8]); // 虛線框
+            ctx.stroke();
+            ctx.setLineDash([]); // 重置虛線
+        }
+
+        function onResults(results) {
+            // 由於 CSS 使用了 scaleX(-1)，Canvas 本身的繪圖座標不變。
+            // 影像直接畫上去，呈現出來會是鏡像的。
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            // 繪製原始影像
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.poseLandmarks) {
+                const landmarks = results.poseLandmarks;
+
+                // 畫出基礎骨架 (預設色)
+                drawConnectors(canvasCtx, landmarks, POSE_CONNECTIONS, {color: 'rgba(255, 255, 255, 0.4)', lineWidth: 2});
+                drawLandmarks(canvasCtx, landmarks, {color: 'rgba(0, 212, 255, 0.8)', lineWidth: 1, radius: 3});
+
+                // 取得核取方塊狀態
+                const activeRules = {
+                    r1: document.getElementById('chk_rule1').checked,
+                    r2: document.getElementById('chk_rule2').checked,
+                    r3: document.getElementById('chk_rule3').checked,
+                    r4: document.getElementById('chk_rule4').checked,
+                    r5: document.getElementById('chk_rule5').checked
+                };
+
+                // 解析地標 (左/右側)
+                // 為了判定哪一面朝向鏡頭，我們計算左右兩側的平均可見度
+                const leftVisibility = (landmarks[11].visibility + landmarks[23].visibility + landmarks[25].visibility + landmarks[27].visibility) / 4;
+                const rightVisibility = (landmarks[12].visibility + landmarks[24].visibility + landmarks[26].visibility + landmarks[28].visibility) / 4;
+                const isLeftVisible = leftVisibility > rightVisibility;
+
+                // 選擇主要追蹤的側邊
+                const shoulder = isLeftVisible ? landmarks[11] : landmarks[12];
+                const hip = isLeftVisible ? landmarks[23] : landmarks[24];
+                const knee = isLeftVisible ? landmarks[25] : landmarks[26];
+                const ankle = isLeftVisible ? landmarks[27] : landmarks[28];
+                const toe = isLeftVisible ? landmarks[31] : landmarks[32]; // foot index
+
+                // 為了 Rule 4，需要雙邊資料
+                const leftShoulder = landmarks[11], rightShoulder = landmarks[12];
+                const leftAnkle = landmarks[27], rightAnkle = landmarks[28];
+                const leftToe = landmarks[31], rightToe = landmarks[32];
+
+                // 判斷是否在深蹲狀態
+                const kneeAngle = getAngle(hip, knee, ankle);
+                
+                // 狀態機更新 (用於 R3 深度判定)
+                let currentHipY = hip.y;
+                hipYHistory.push(currentHipY);
+                if (hipYHistory.length > 5) hipYHistory.shift();
+                let smoothedHipY = hipYHistory.reduce((a, b) => a + b) / hipYHistory.length;
+                
+                if (kneeAngle > 150) {
+                    squatState = 'standing';
+                    squatStateUi.innerText = '站立';
+                    squatStateUi.className = 'font-bold text-green-400';
+                } else if (smoothedHipY > prevHipY + 0.002) {
+                    squatState = 'descending';
+                    squatStateUi.innerText = '下蹲中...';
+                    squatStateUi.className = 'font-bold text-yellow-400';
+                } else if (smoothedHipY < prevHipY - 0.002 && kneeAngle < 140) {
+                    squatState = 'ascending';
+                    squatStateUi.innerText = '起身中...';
+                    squatStateUi.className = 'font-bold text-blue-400';
+                }
+                prevHipY = smoothedHipY;
+
+                // ==========================================
+                // 規則判定開始
+                // ==========================================
+                
+                // R1: 抬頭挺胸重心不前傾 (背部不過度傾斜)
+                // 邏輯: 軀幹(肩到髖)與垂直線的夾角。如果大於 45 度，視為過度前傾。
+                if (activeRules.r1 && kneeAngle < 160) {
+                    let torsoVerticalAngle = getAngleWithVertical(shoulder, hip);
+                    if (torsoVerticalAngle > 40) {
+                        errorFrames.r1++;
+                        if (errorFrames.r1 > FRAME_THRESHOLD) {
+                            speak('請抬頭挺胸，背部不要過度前傾', 'r1');
+                            drawHighlightLine(canvasCtx, shoulder, hip, '#ef4444', 8);
+                        }
+                    } else {
+                        errorFrames.r1 = 0;
+                    }
+                }
+
+                // R2: 上半身與小腿平行
+                // 邏輯: 軀幹斜率角度與小腿斜率角度差異過大
+                if (activeRules.r2 && kneeAngle < 130) {
+                    // 我們用與水平線的夾角來比較 (使用 atan2 會自動處理正負號，但我們用絕對斜率比較)
+                    let torsoAngle = Math.atan2(Math.abs(hip.y - shoulder.y), Math.abs(hip.x - shoulder.x)) * 180 / Math.PI;
+                    let shinAngle = Math.atan2(Math.abs(ankle.y - knee.y), Math.abs(ankle.x - knee.x)) * 180 / Math.PI;
+                    let diff = Math.abs(torsoAngle - shinAngle);
+                    
+                    if (diff > 20) { // 容忍 20 度差異
+                        errorFrames.r2++;
+                        if (errorFrames.r2 > FRAME_THRESHOLD) {
+                            speak('上半身請與小腿保持平行', 'r2');
+                            drawHighlightLine(canvasCtx, shoulder, hip, '#f59e0b', 6); // 橘色標示
+                            drawHighlightLine(canvasCtx, knee, ankle, '#f59e0b', 6);
+                        }
+                    } else {
+                        errorFrames.r2 = 0;
+                    }
+                }
+
+                // R3: 大腿平行地面
+                // 邏輯: 當狀態從下降變成上升時，或是已經蹲得很低時，大腿與水平的夾角是否夠小。
+                // 為了即時回饋，如果膝蓋彎曲度小於100(深蹲)，但大腿與水平大於25度，提示蹲不夠低。
+                if (activeRules.r3) {
+                    if (squatState === 'ascending' && kneeAngle < 110) {
+                        let thighAngle = getAngleWithHorizontal(hip, knee);
+                        if (thighAngle > 20) { // 大於20度代表沒蹲到水平
+                            errorFrames.r3++;
+                            if (errorFrames.r3 > 2) { // R3 門檻低一點，因為抓起身瞬間
+                                speak('蹲得不夠低，大腿需平行地面', 'r3');
+                                drawHighlightLine(canvasCtx, hip, knee, '#ec4899', 8); // 粉紅標示
+                            }
+                        }
+                    } else {
+                        errorFrames.r3 = 0;
+                    }
+                }
+
+                // R4: 雙腳與肩同寬、略外八
+                // 邏輯: 測量肩膀寬度與腳踝寬度比例。腳尖寬度要略大於腳踝寬度。
+                // 為了避免側面拍攝時寬度測量失效，只有當肩膀X軸距離夠大時才測量。
+                if (activeRules.r4 && squatState === 'standing') {
+                    let shoulderWidth = Math.abs(leftShoulder.x - rightShoulder.x);
+                    if (shoulderWidth > 0.05) { // 確保不是完全正側面
+                        let stanceWidth = Math.abs(leftAnkle.x - rightAnkle.x);
+                        let toeWidth = Math.abs(leftToe.x - rightToe.x);
+                        
+                        let isBadStance = false;
+                        let msg = '';
+                        
+                        // 肩寬與站距比例
+                        if (stanceWidth < shoulderWidth * 0.75) {
+                            isBadStance = true; msg = '雙腳站太窄，請與肩同寬';
+                        } else if (stanceWidth > shoulderWidth * 1.8) {
+                            isBadStance = true; msg = '雙腳站太寬了';
+                        } 
+                        // 外八檢查 (腳尖寬度應該要大於腳跟/腳踝寬度)
+                        else if (toeWidth <= stanceWidth + 0.01) {
+                            isBadStance = true; msg = '腳尖請略微外八';
+                        }
+
+                        if (isBadStance) {
+                            errorFrames.r4++;
+                            if (errorFrames.r4 > FRAME_THRESHOLD * 2) { // 站姿給點時間調整
+                                speak(msg, 'r4');
+                                drawHighlightBox(canvasCtx, [leftAnkle, rightAnkle, leftToe, rightToe], '#a855f7'); // 紫色框
+                                drawHighlightLine(canvasCtx, leftShoulder, rightShoulder, '#a855f7', 4);
+                            }
+                        } else {
+                            errorFrames.r4 = 0;
+                        }
+                    }
+                }
+
+                // R5: 膝蓋不應超過腳尖
+                // 邏輯: 找出向前的方向向量，判斷膝蓋X座標是否超出腳尖X座標。
+                if (activeRules.r5 && kneeAngle < 140) {
+                    // X座標方向判斷：由腳踝指向腳尖代表"前方"
+                    let forwardDir = toe.x - ankle.x; 
+                    let isKneeOverToe = false;
+                    
+                    if (forwardDir > 0) {
+                        // 腳尖在腳踝右側 (面朝右)
+                        if (knee.x > toe.x + 0.02) isKneeOverToe = true; // 加0.02容差
+                    } else {
+                        // 腳尖在腳踝左側 (面朝左)
+                        if (knee.x < toe.x - 0.02) isKneeOverToe = true;
+                    }
+
+                    if (isKneeOverToe) {
+                        errorFrames.r5++;
+                        if (errorFrames.r5 > FRAME_THRESHOLD) {
+                            speak('膝蓋超過腳尖了，請將重心往後移', 'r5');
+                            // 畫垂線對齊表示
+                            drawHighlightBox(canvasCtx, [knee, toe], '#ef4444');
+                            // 從腳尖畫一條紅色的垂直線作為警戒線
+                            ctxDrawVerticalLine(canvasCtx, toe.x, '#ff0000');
+                        }
+                    } else {
+                        errorFrames.r5 = 0;
+                    }
+                }
+            }
+            canvasCtx.restore();
+        }
+
+        // 輔助繪圖：畫一條穿過螢幕的垂直線(警戒線)
+        function ctxDrawVerticalLine(ctx, normX, color) {
+            ctx.beginPath();
+            ctx.moveTo(normX * canvasElement.width, 0);
+            ctx.lineTo(normX * canvasElement.width, canvasElement.height);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // 初始化 MediaPipe Pose
+        const pose = new Pose({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }});
+        
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            enableSegmentation: false,
+            smoothSegmentation: false,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        
+        pose.onResults(onResults);
+
+        // 啟動按鈕事件
+        btnStart.addEventListener('click', () => {
+            if (isStarted) return;
+            
+            // 觸發音效引擎初始化 (必須由使用者互動觸發)
+            let utterThis = new SpeechSynthesisUtterance("系統初始化完成，準備開始監測");
+            utterThis.lang = 'zh-TW';
+            utterThis.volume = 0; // 靜音播報以解鎖權限
+            synth.speak(utterThis);
+
+            btnStart.style.display = 'none';
+            loadingText.style.display = 'block';
+
+            // 啟動相機
+            camera = new Camera(videoElement, {
+                onFrame: async () => {
+                    await pose.send({image: videoElement});
+                },
+                width: 1280,
+                height: 720,
+                facingMode: "user" // 預設使用前鏡頭/Webcam
+            });
+            
+            camera.start().then(() => {
+                isStarted = true;
+                startOverlay.classList.add('opacity-0');
+                setTimeout(() => {
+                    startOverlay.style.display = 'none';
+                    // 正式用語音提示開始
+                    let startUtter = new SpeechSynthesisUtterance("開始深蹲姿態監測。請確保全身入鏡。");
+                    startUtter.lang = 'zh-TW';
+                    synth.speak(startUtter);
+                }, 500);
+            }).catch(err => {
+                alert("無法存取攝影機，請確認已給予權限。錯誤: " + err);
+                btnStart.style.display = 'block';
+                loadingText.style.display = 'none';
+            });
+        });
+    </script>
+</body>
+</html>
